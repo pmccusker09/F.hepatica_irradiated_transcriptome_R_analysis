@@ -1,0 +1,363 @@
+---
+title: "Control vs Irradiated Analysis"
+author: "Paul McC"
+date: "02/11/2021"
+output: html_document
+---
+
+## Install packages
+
+```{r}
+install.packages(c("BiocManager", "dplyr", "gplots", "ggplot2", "ggrepel", "tidyverse", "heatmap3", "tidyr", "pheatmap"))
+BiocManager::install(c("limma", "DESeq2", "AnnotationDds", "ReportingTools", "GO.db", "GOstats", "pathview", "gage", "gageData", "sdect", "tidyverse", "topGO"))
+```
+
+## Import counts data, edit and transform to visualise
+```{r}
+#Import counts with top row -> header
+countData <- read.csv("irr_v_ctrl_gene_counts_clean.csv", header = 1)
+#Edit row names to remove first row
+rownames(countData) <- countData$gene_id
+countData <- countData[,-1]
+#Get summary information
+summary(countData)
+#Count number of reads in each sample and plot
+colSums(countData)
+barplot(colSums(countData)/1e6,
+          ylim = c(0,20),
+        xlab = "Sample",
+        ylab = "No. reads (million)")
+#Log transform datasets and then compare
+logcountData <- log2(countData)
+plot(logcountData[,1], logcountData[,4])
+```
+
+## Create DESeq dataset
+```{r}
+#Make information about dataset
+replicate <- c("1", "2", "3", "1", "2", "3")
+treatment <- c("Control", "Control", "Control", "Irradiated", "Irradiated", "Irradiated")
+colData <- as.data.frame(cbind(colnames(countData), replicate, treatment))
+
+#Build dds dataset for DESeq
+library("DESeq2")
+dds <- DESeqDataSetFromMatrix(countData = countData,
+                              colData = colData,
+                              design = ~ treatment)
+dds = DESeq(dds)
+#Check that number of rows in CountData is same as "dds"
+nrow(dds)
+#Remove rows that have less than 10 counts in them
+dds <- dds[rowSums(counts(dds)) >= 10]
+```
+
+## Construct PCA
+```{r}
+#Function to get Group titles
+detectGroups <- function (x){  # x are col names
+  tem <- gsub("[0-9]*$","",x) # Remove all numbers from end
+  return( tem )
+}
+
+#Make PCA plot
+library("ggplot2")
+rld <- rlog(dds, blind = FALSE)
+PCAdataset <- prcomp(t(assay(rld)))
+PCAdata <- as.data.frame(PCAdataset$x[,1:2])
+PCAdata = cbind(PCAdata,detectGroups(colnames(assay(rld)) ))
+percentVar=round(100*summary(PCAdataset)$importance[2,1:2],0)
+colnames(PCAdata) <- c("PC1", "PC2", "Treatment")
+PCAplot=ggplot(PCAdata, aes(PC1, PC2, color=Treatment, shape = Treatment)) + 
+  geom_point(size=4) +
+  theme_minimal(base_size = 10, base_family = "sans") +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.line.x = element_line(color="black", size = 0.4),
+        axis.line.y = element_line(color="black", size = 0.4),
+        axis.title.x  = element_text(face = "bold", size = 15),
+        axis.title.y  = element_text(face = "bold", size = 15),
+        axis.text.x = element_text(size = 12, hjust = 1),
+        axis.text.y = element_text(size = 12),
+        legend.title=element_blank(),
+        legend.text=element_text(size=13))
+print(PCAplot)
+ggsave(filename = "PCAplot.tiff", device='tiff', dpi=700)
+
+```
+
+## Return list of genes that have adjp value of <0.05
+```{r}
+res <- results(dds, alpha=0.05)
+head(res)
+summary(res)
+```
+
+## Make an MA plot of relationship between log fold chance and normalised read counts
+```{r}
+DESeq2::plotMA(res, ylim = c(-5, 5), xlab = "Mean # Normalised Counts", ylab = "Log2FoldChange")
+```
+
+## Make volcano plot
+```{r}
+#Add new column showing whether or not the results are significant
+library(dplyr)
+resl <- as.data.frame(res)
+resl <- mutate(resl, sig=ifelse(resl$padj<0.05, "FDR<0.05", "Not Sig"))
+#Change column to count only those that had fold change >1.0
+# resl[which(abs(res1$log2FoldChange)<1.0), "sig"] = "Not sig"
+
+#Make volcano plot
+library(ggplot2)
+volcanoplot <- ggplot(resl, aes(log2FoldChange, -log10(padj))) +
+  xlim(-10,10) +
+  scale_y_continuous(expand = c(0,0), limits = c(0,110)) +
+  geom_point(aes(col=sig), size = 1) +
+  geom_vline(xintercept=0, linetype="dashed", color = "black", size=0.5) +
+  scale_color_manual(values=c("red", "black")) +
+  theme_minimal(base_size = 10, base_family = "sans") +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.line.x = element_line(color="black", size = 0.4),
+        axis.line.y = element_line(color="black", size = 0.4,),
+        axis.title.x  = element_text(face = "bold", size = 15, family = "TT Arial"),
+        axis.title.y  = element_text(face = "bold", size = 15, family = "TT Arial"),
+        axis.text.x = element_text(size = 12, family = "TT Arial"),
+        axis.text.y = element_text(size = 12, family = "TT Arial"),
+        legend.title=element_blank(),
+        legend.text=element_text(size=13, family = "TT Arial"))
+print(volcanoplot)
+ggsave(filename = "volcanoplot.tiff", device='tiff', dpi=700)
+```
+
+## Export Results to csv file
+```{r}
+#Reorder to place most downregulate at top
+resSig <- as.data.frame(subset(res,padj<0.05))
+resSig <- resSig[order(resSig$log2FoldChange,decreasing=FALSE),]
+head(resSig)
+
+#Write all results to csv
+write.csv(res, file = "results.csv")
+#Write sig results to csv
+write.csv(resSig, file = "Sig_results.csv")
+```
+
+## Make heatmap of top 100 genes ranked by Standard deviation
+```{r}
+library("heatmap3")
+
+#distance function (Pearson's correlation coefficient)
+dist2 <- function(x, ...){   
+  as.dist(1-cor(t(x), method="pearson"))
+}
+
+#average linkage for hierarchical clustering
+hclust2 <- function(x, method="average", ...){ 
+  hclust(x, method=method, ...)
+}
+
+#number of top genes ranked by standard dev to display
+n=100
+
+#Assign x as log transformed dds
+x = assay(rld)
+# max	as data
+if(n>dim(x)[1]) n = dim(x)[1]
+# sort genes by standard deviation
+x = x[order(apply(x,1,sd),decreasing=TRUE),]  
+# only keep the n genes
+x = x[1:n,]   
+# cutoff very large values to avoid outsized colours 
+x=as.matrix(x[1:n,])-apply(x[1:n,],1,mean)
+cutoff = median(unlist(x)) + 4*sd (unlist(x)) 
+x[x>cutoff] <- cutoff
+cutoff = median(unlist(x)) - 4*sd (unlist(x)) 
+x[x< cutoff] <- cutoff
+groups = detectGroups(colnames(x) )
+groups.colors = rainbow(length(unique(groups) ) )
+
+
+	lmat = rbind(c(5,4),c(0,1),c(3,2))
+	lwid = c(1.5,4)
+	lhei = c(1,.2,4)
+
+#Change colour scale
+my_palette <- colorRampPalette(c("blue", "white", "orange"))
+#Make heatmap
+heatmap3(x, distfun = dist2,hclustfun=hclust2,
+	 col=my_palette(75), density.info="none", trace="none", scale="none", keysize=.5
+	,key=T, symkey=F
+	,ColSideColors=groups.colors[ as.factor(groups)]
+	,margins=c(8,12)
+	,cexRow=1
+	,srtCol=45
+	,cexCol=1.  # size of font for sample names
+	,lmat = lmat, lwid = lwid, lhei = lhei
+	)
+
+```
+
+## Build TopGO Analysis Datasets
+```{r}
+library("topGO")
+library("tidyr")
+
+#Obtain list of downregulated genes
+res_names <- setNames(cbind(rownames(resl), resl, row.names = NULL), 
+         c("transcript","baseMean","log2FoldChange","lfcSE","stat","pvalue","padj","SIG"))
+res_05 <- subset(res_names, padj<0.05)
+
+SelectGenesUp <- unique(res_05[res_05$log2FoldChange>0, 'transcript'])
+SelectGenesDown <- unique(res_05[res_05$log2FoldChange<0, 'transcript'])
+
+#Import list of all  genes + GO Terms and find Up and Down genes in this dataset
+geneID2GO <- readMappings(file = "All_Fasciola_GO_Terms.txt")
+geneUniverse <- names(geneID2GO)
+genesUpList <- factor(as.integer(geneUniverse %in% SelectGenesUp))
+genesDownList <- factor(as.integer(geneUniverse %in% SelectGenesDown))
+names(genesUpList) <- geneUniverse
+names(genesDownList) <- geneUniverse
+
+#Build topGOdata object for UP Biological Process, Molecular Function and Cellular Component
+TopGOUpBP <- new("topGOdata", 
+                description="My project",
+                ontology="BP", 
+                allGenes=genesUpList,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO)
+TopGOUpMF <- new("topGOdata", 
+                description="My project",
+                ontology="MF", 
+                allGenes=genesUpList,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO)
+TopGOUpCC <- new("topGOdata", 
+                description="My project",
+                ontology="CC", 
+                allGenes=genesUpList,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO)
+
+#Build topGOdata object for DOWN Biological Process, Molecular Function and Cellular Component
+TopGODownBP <- new("topGOdata", 
+                description="My project",
+                ontology="BP", 
+                allGenes=genesDownList,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO)
+TopGODownMF <- new("topGOdata", 
+                description="My project",
+                ontology="MF", 
+                allGenes=genesDownList,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO)
+TopGODownCC <- new("topGOdata", 
+                description="My project",
+                ontology="CC", 
+                allGenes=genesDownList,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO)
+```
+
+##Carry out TopGO analysis
+```{r}
+#Carry out Fisher test with weight01
+resultFisherDownBP <- runTest(TopGODownBP, algorithm="weight01", statistic="fisher")
+resultFisherDownMF <- runTest(TopGODownMF, algorithm="weight01", statistic="fisher")
+resultFisherDownCC <- runTest(TopGODownCC, algorithm="weight01", statistic="fisher")
+resultFisherUpBP <- runTest(TopGOUpBP, algorithm="weight01", statistic="fisher")
+resultFisherUpMF <- runTest(TopGOUpMF, algorithm="weight01", statistic="fisher")
+resultFisherUpCC <- runTest(TopGOUpCC, algorithm="weight01", statistic="fisher")
+
+#How many results have a p value of < 0.05?
+summary_DownBP <- summary(attributes(resultFisherDownBP)$score <= 0.05)
+numsig_DownBP <- as.integer(summary_DownBP[[3]])
+summary_DownMF <- summary(attributes(resultFisherDownMF)$score <= 0.05)
+numsig_DownMF <- as.integer(summary_DownMF[[3]])
+summary_DownCC <- summary(attributes(resultFisherDownCC)$score <= 0.05)
+numsig_DownCC <- as.integer(summary_DownCC[[3]])
+summary_UpBP <- summary(attributes(resultFisherUpBP)$score <= 0.05)
+numsig_UpBP <- as.integer(summary_UpBP[[3]])
+summary_UpMF <- summary(attributes(resultFisherUpMF)$score <= 0.05)
+numsig_UpMF <- as.integer(summary_UpMF[[3]])
+summary_UpCC <- summary(attributes(resultFisherUpCC)$score <= 0.05)
+numsig_UpCC <- as.integer(summary_UpCC[[3]])
+
+#See results
+TopGODownBP_res <- GenTable(TopGODownBP, topgoFisher = resultFisherDownBP, orderBy = "topgoFisher", ranksOf = "classicFisher", topNodes = numsig_DownBP)
+TopGODownMF_res <- GenTable(TopGODownMF, topgoFisher = resultFisherDownMF, orderBy = "topgoFisher", ranksOf = "classicFisher", topNodes = numsig_DownMF)
+TopGODownCC_res <- GenTable(TopGODownCC, topgoFisher = resultFisherDownCC, orderBy = "topgoFisher", ranksOf = "classicFisher", topNodes = numsig_DownCC)
+TopGOUpBP_res <- GenTable(TopGOUpBP, topgoFisher = resultFisherUpBP, orderBy = "topgoFisher", ranksOf = "classicFisher", topNodes = numsig_UpBP)
+TopGOUpMF_res <- GenTable(TopGOUpMF, topgoFisher = resultFisherUpMF, orderBy = "topgoFisher", ranksOf = "classicFisher", topNodes = numsig_UpMF)
+TopGOUpCC_res <- GenTable(TopGOUpCC, topgoFisher = resultFisherUpCC, orderBy = "topgoFisher", ranksOf = "classicFisher", topNodes = numsig_UpCC)
+
+#Save results to .csv
+write.csv(TopGODownBP_res, file = "TopGODownBP_res.csv")
+write.csv(TopGODownMF_res, file = "TopGODownMF_res.csv")
+write.csv(TopGODownCC_res, file = "TopGODownCC_res.csv")
+write.csv(TopGOUpBP_res, file = "TopGOUpBP_res.csv")
+write.csv(TopGOUpMF_res, file = "TopGOUpMF_res.csv")
+write.csv(TopGOUpCC_res, file = "TopGOUpCC_res.csv")
+
+```
+
+## KEGG Pathway Analysis
+```{r}
+library(pathview)
+library(gage)
+library(gageData)
+
+#Import KEGG IDs and add to data frame
+KEGG_IDs <- read.csv("Fasciola_Kegg_IDs.csv")
+res_names_KEGG <- merge(res_names, KEGG_IDs, by = 'transcript', all = TRUE)
+
+#Pull out foldchanges and KEGG IDs
+foldchanges <- res_names_KEGG$log2FoldChange
+names(foldchanges) <- res_names_KEGG$KEGG
+
+#Load KEGG Datasets and run analysis
+data(kegg.gs)
+kg.ko=kegg.gsets("ko")
+kegg.gs=kg.ko$kg.sets[kg.ko$sigmet.idx]
+keggres <- gage(exprs = foldchanges, gsets = kegg.gs, same.dir = TRUE)
+
+#Identify sig. KEGG pathways and save as .csv
+keggrespathwaysup <- data.frame(id = rownames(keggres$greater), keggres$greater) %>% tibble::as_tibble()
+keggrespathwaysup <- subset(keggrespathwaysup, p.val < 0.05)
+write.csv(keggrespathwaysup, file = "KEGG_pathways_up.csv")
+
+keggrespathwaysdown <- data.frame(id = rownames(keggres$less), keggres$less) %>% tibble::as_tibble()
+keggrespathwaysdown <- subset(keggrespathwaysdown, p.val < 0.05)
+write.csv(keggrespathwaysdown, file = "KEGG_pathways_down.csv")
+
+```
+
+## Pull out top 5 KEGG pathways up and down from diff genes and make pathviews
+```{r}
+diff_Top5KEGGUp <- keggrespathwaysup %>%
+  filter(row_number() <= 5) %>%
+  .$id %>%
+  as.character()
+diff_keggIDsup <- substr(diff_Top5KEGGUp, start=1, stop=7)
+
+diff_Top5KEGGDown <- keggrespathwaysdown %>%
+  filter(row_number() <= 5) %>%
+  .$id %>%
+  as.character()
+diff_keggIDsdown <- substr(diff_Top5KEGGDown, start=1, stop=7)
+
+
+tmp = sapply(diff_keggIDsup, function(pid) pathview(gene.data = foldchanges, pathway.id = pid, species = "ko", out.suffix = "_diff_up", low =list(gene = "deepskyblue", cpd = "deepskyblue"),
+         mid = list(gene = "gray", cpd ="gray"),
+         high = list(gene = "red", cpd = "yellow")))
+tmp = sapply(diff_keggIDsdown, function(pid) pathview(gene.data = foldchanges, pathway.id = pid, species = "ko", out.suffix = "_diff_down",low =list(gene = "deepskyblue", cpd = "deepskyblue"),
+         mid = list(gene = "gray", cpd ="gray"),
+         high = list(gene = "red", cpd = "yellow"),))
+```
+
